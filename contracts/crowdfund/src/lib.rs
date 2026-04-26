@@ -8,7 +8,7 @@ mod types;
 
 pub use errors::ContractError;
 pub use storage::{CONTRACT_VERSION, KEY_ADMIN, KEY_CONTRIBS, KEY_CREATOR, KEY_DEADLINE, KEY_DESC, KEY_GOAL, KEY_MIN, KEY_PLATFORM, KEY_SOCIAL, KEY_STATUS, KEY_TITLE, KEY_TOKEN, KEY_TOTAL, MAX_UPDATES, MAX_MILESTONES};
-pub use types::{CampaignInfo, CampaignStats, DataKey, PlatformConfig, Status, CampaignUpdate, Milestone};
+pub use types::{CampaignInfo, CampaignStats, DataKey, PlatformConfig, Status, CampaignUpdate, Milestone, MatchingConfig};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
@@ -193,9 +193,24 @@ impl CrowdfundContract {
         env.storage().persistent().set(&key, &new_amount);
         env.storage().persistent().extend_ttl(&key, 100, 100);
 
-        let total: i128 = env.storage().instance().get(&KEY_TOTAL).unwrap();
+        let mut total: i128 = env.storage().instance().get(&KEY_TOTAL).unwrap();
         let new_total = total.checked_add(amount).ok_or(ContractError::Overflow)?;
-        env.storage().instance().set(&KEY_TOTAL, &new_total);
+
+        // Apply matching if configured
+        let mut matched_amount = 0i128;
+        if let Some(config) = env.storage().instance().get::<_, MatchingConfig>(&DataKey::MatchingConfig) {
+            let match_amount = (amount * config.match_ratio as i128) / 10_000;
+            let total_matched: i128 = env.storage().instance().get(&DataKey::TotalMatched).unwrap_or(0);
+            let available_match = config.max_match - total_matched;
+            matched_amount = match_amount.min(available_match).max(0);
+            
+            if matched_amount > 0 {
+                env.storage().instance().set(&DataKey::TotalMatched, &(total_matched + matched_amount));
+            }
+        }
+
+        let final_total = new_total.checked_add(matched_amount).ok_or(ContractError::Overflow)?;
+        env.storage().instance().set(&KEY_TOTAL, &final_total);
 
         let presence_key = DataKey::ContributorPresence(contributor.clone());
         let is_present: bool = env.storage().persistent().get(&presence_key).unwrap_or(false);
@@ -686,6 +701,84 @@ impl CrowdfundContract {
         }
 
         milestones
+    }
+
+    // ── Contribution Matching ─────────────────────────────────────────────────
+
+    /// Sets up matching configuration for sponsor contributions.
+    ///
+    /// Only the creator can set up matching. Replaces any existing configuration.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `sponsor` - Sponsor address providing matching funds
+    /// * `match_ratio` - Match ratio in basis points (e.g., 10000 = 1:1)
+    /// * `max_match` - Maximum total matching amount
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(ContractError::NotActive)` if campaign is not Active
+    pub fn setup_matching(
+        env: Env,
+        sponsor: Address,
+        match_ratio: u32,
+        max_match: i128,
+    ) -> Result<(), ContractError> {
+        let creator: Address = env.storage().instance().get(&KEY_CREATOR).unwrap();
+        creator.require_auth();
+
+        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
+        if status != Status::Active {
+            return Err(ContractError::NotActive);
+        }
+
+        let config = MatchingConfig {
+            sponsor,
+            match_ratio,
+            max_match,
+        };
+
+        env.storage().instance().set(&DataKey::MatchingConfig, &config);
+        env.storage().instance().set(&DataKey::TotalMatched, &0i128);
+        env.events().publish(("campaign", "matching_setup"), ());
+        Ok(())
+    }
+
+    /// Withdraws matched funds for the sponsor.
+    ///
+    /// Sponsor can withdraw their matched contribution after campaign success.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(ContractError::NotActive)` if campaign is not Successful
+    /// * `Err(ContractError::GoalNotReached)` if goal not reached
+    pub fn withdraw_matching(env: Env) -> Result<(), ContractError> {
+        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
+        if status != Status::Successful {
+            return Err(ContractError::NotActive);
+        }
+
+        let config: MatchingConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::MatchingConfig)
+            .ok_or(ContractError::NotActive)?;
+
+        config.sponsor.require_auth();
+
+        let total_matched: i128 = env.storage().instance().get(&DataKey::TotalMatched).unwrap_or(0);
+        if total_matched > 0 {
+            let token_address: Address = env.storage().instance().get(&KEY_TOKEN).unwrap();
+            token::Client::new(&env, &token_address)
+                .transfer(&env.current_contract_address(), &config.sponsor, &total_matched);
+            env.storage().instance().set(&DataKey::TotalMatched, &0i128);
+            env.events().publish(("campaign", "matching_withdrawn"), total_matched);
+        }
+
+        Ok(())
     }
 
     // ── View functions ────────────────────────────────────────────────────────

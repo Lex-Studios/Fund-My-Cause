@@ -107,6 +107,18 @@ pub struct Milestone {
     pub reached: bool,
 }
 
+/// Matching configuration for sponsor contributions.
+#[derive(Clone)]
+#[contracttype]
+pub struct MatchingConfig {
+    /// Sponsor address providing matching funds
+    pub sponsor: Address,
+    /// Match ratio in basis points (e.g., 10000 = 1:1 match)
+    pub match_ratio: u32,
+    /// Maximum total matching amount in stroops
+    pub max_match: i128,
+}
+
 /// Storage key variants for contract data.
 ///
 /// Used to organize persistent and instance storage in the contract.
@@ -127,4 +139,8 @@ pub enum DataKey {
     Updates,
     /// Milestones vector
     Milestones,
+    /// Matching configuration
+    MatchingConfig,
+    /// Total matched amount
+    TotalMatched,
 }
