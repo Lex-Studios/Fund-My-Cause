@@ -74,6 +74,7 @@ pub use types::{
     EventBlacklistRemoved,
     EventBlacklisted,
     // #416
+    EventCampaignCloned,
     EventCancelled,
     EventCategoryUpdated,
     EventContributed,
@@ -3342,6 +3343,97 @@ impl CrowdfundContract {
             EventInsurancePayout {
                 contributor,
                 amount: insurance_fee,
+            },
+        );
+        Ok(())
+    }
+
+    /// Clones a campaign with new creator and deadline.
+    ///
+    /// Allows a creator to clone an existing campaign's metadata and settings
+    /// while resetting contribution data. The new campaign starts fresh with
+    /// zero contributions.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `new_creator` - The new campaign creator's address (must authorize)
+    /// * `new_goal` - The funding goal for the cloned campaign
+    /// * `new_deadline` - The deadline for the cloned campaign
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(ContractError::NotCreator)` if caller is not the original creator
+    /// * `Err(ContractError::InvalidGoal)` if new_goal <= 0
+    /// * `Err(ContractError::InvalidDeadline)` if new_deadline <= current time
+    pub fn clone_campaign(
+        env: Env,
+        new_creator: Address,
+        new_goal: i128,
+        new_deadline: u64,
+    ) -> Result<(), ContractError> {
+        let inst = env.storage().instance();
+        let creator: Address = inst.get(&KEY_CREATOR).unwrap();
+        creator.require_auth();
+
+        if new_goal <= 0 {
+            return Err(ContractError::InvalidGoal);
+        }
+        validate_goal_not_overflow(new_goal)?;
+        if new_deadline <= env.ledger().timestamp() {
+            return Err(ContractError::InvalidDeadline);
+        }
+
+        // Copy metadata from current campaign
+        let title: String = inst.get(&KEY_TITLE).unwrap();
+        let description: String = inst.get(&KEY_DESC).unwrap();
+        let token: Address = inst.get(&KEY_TOKEN).unwrap();
+        let min_contribution: i128 = inst.get(&KEY_MIN).unwrap();
+        let max_contribution: i128 = inst.get(&KEY_MAX).unwrap_or(0);
+        let category: Category = inst.get(&KEY_CATEGORY).unwrap();
+        let social_links: Option<Vec<String>> = inst.get(&KEY_SOCIAL);
+        let platform_config: Option<PlatformConfig> = inst.get(&KEY_PLATFORM);
+        let vesting: Option<VestingSchedule> = inst.get(&KEY_VESTING);
+
+        // Reset contribution data for new campaign
+        let empty: Vec<Address> = Vec::new(&env);
+        env.storage().persistent().set(&KEY_CONTRIBS, &empty);
+
+        // Reset instance storage for new campaign
+        inst.set(&KEY_ADMIN, &new_creator);
+        inst.set(&KEY_CREATOR, &new_creator);
+        inst.set(&KEY_GOAL, &new_goal);
+        inst.set(&KEY_DEADLINE, &new_deadline);
+        inst.set(&KEY_TOTAL, &0i128);
+        inst.set(&KEY_STATUS, &Status::Active);
+        inst.set(&DataKey::ContributorCount, &0u32);
+        inst.set(&DataKey::LargestContribution, &0i128);
+
+        // Reset goal history
+        let mut history: Vec<GoalAdjustment> = Vec::new(&env);
+        history.push_back(GoalAdjustment {
+            previous_goal: 0,
+            new_goal,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&KEY_GOAL_HISTORY, &history);
+
+        // Reset metadata version history
+        let mut meta_hist: Vec<MetadataVersion> = Vec::new(&env);
+        meta_hist.push_back(MetadataVersion {
+            version: 0,
+            title: title.clone(),
+            description: description.clone(),
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&KEY_META_HIST, &meta_hist);
+
+        env.events().publish(
+            ("campaign", "cloned"),
+            EventCampaignCloned {
+                original_creator: creator,
+                new_creator,
+                new_goal,
+                new_deadline,
             },
         );
         Ok(())

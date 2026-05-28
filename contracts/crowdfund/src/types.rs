@@ -873,3 +873,15 @@ pub struct EventContributionRecorded {
     pub timestamp: u64,
     pub running_total: i128,
 }
+
+/// Emitted when a campaign is cloned from an existing campaign.
+///
+/// Event topic: `("campaign", "cloned")`
+#[derive(Clone)]
+#[contracttype]
+pub struct EventCampaignCloned {
+    pub original_creator: Address,
+    pub new_creator: Address,
+    pub new_goal: i128,
+    pub new_deadline: u64,
+}
